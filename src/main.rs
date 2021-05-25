@@ -1,12 +1,12 @@
 // For reading and opening files
 use anyhow::Result;
-use ordered_float::NotNan;
+use ordered_float::{FloatIsNan, NotNan};
 use png;
 use std::convert::TryInto;
 use std::f64::consts::PI;
 use std::fs::File;
-use std::io::BufWriter;
-use std::ops::{Add, AddAssign, Index, IndexMut, Mul, Sub, SubAssign};
+use std::io::{stdout, BufWriter, Write};
+use std::ops::{Add, Index, IndexMut, Mul, Sub};
 use std::path::Path;
 
 fn main() {
@@ -15,36 +15,54 @@ fn main() {
             Sphere {
                 pt: V3::new(0., 0., 20.),
                 r2: 100.0.try_into().unwrap(),
-                color: [255, 0, 0],
+                material: Material::new([1.0, 0.0, 0.0]).unwrap(),
             },
             Sphere {
                 pt: V3::new(0., 0., 10.),
                 r2: 9.0.try_into().unwrap(),
-                color: [0, 255, 0],
+                material: Material::new([0.0, 1.0, 0.0]).unwrap(),
             },
             Sphere {
                 pt: V3::new(1., 1., 3.),
                 r2: 1.0.try_into().unwrap(),
-                color: [0, 0, 255],
+                material: Material::new([0.0, 0.0, 1.0]).unwrap(),
             },
         ],
         camera: Camera {},
+        ambient: new_color([1.0, 1.0, 1.0]).unwrap(),
     };
     let image = scene.render();
     image.write("out.png").unwrap();
 }
 
-struct Image([u8; 4_000000]);
+const WIDTH: usize = 1000;
+const HEIGHT: usize = 1000;
+
+struct Image(Box<[Color]>);
+
+const BLACK: Color = unsafe { unchecked_new_color([0.0; 3]) };
 
 impl Image {
     fn new() -> Self {
-        let mut image = Image([0; 4_000000]);
-        for pixel in image.0.chunks_exact_mut(4) {
-            pixel[3] = 255; // Alpha
-        }
-        image
+        let v = vec![BLACK; WIDTH * HEIGHT];
+        Image(v.into_boxed_slice())
     }
     fn write(&self, path: &str) -> Result<()> {
+        let mut buffer = [0; 4 * WIDTH * HEIGHT];
+        let max_exposure = self
+            .0
+            .iter()
+            .flat_map(|px| px.iter())
+            .copied()
+            .max()
+            .unwrap()
+            .into_inner();
+        for (b_px, px) in buffer.chunks_exact_mut(4).zip(self.0.iter()) {
+            for i in 0..3 {
+                b_px[i] = (px[i].into_inner() * 255.0 / max_exposure) as u8;
+            }
+            b_px[3] = 255;
+        }
         let path = Path::new(path);
         let file = File::create(path)?;
         let ref mut w = BufWriter::new(file);
@@ -53,55 +71,102 @@ impl Image {
         encoder.set_color(png::ColorType::RGBA);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header()?;
-        writer.write_image_data(&self.0)?;
+        writer.write_image_data(&buffer)?;
         Ok(())
     }
 }
 
 impl Index<(usize, usize)> for Image {
-    type Output = [u8; 3];
+    type Output = [NotNan<f32>; 3];
 
     fn index(&self, (x, y): (usize, usize)) -> &Self::Output {
-        let i = (y * 1000 + x) * 4;
-        self.0[i..i + 3].try_into().unwrap()
+        let i = y * WIDTH + x;
+        &self.0[i]
     }
 }
 
 impl IndexMut<(usize, usize)> for Image {
     fn index_mut(&mut self, (x, y): (usize, usize)) -> &mut Self::Output {
-        let i = (y * 1000 + x) * 4;
-        (&mut self.0[i..i + 3]).try_into().unwrap()
+        let i = y * WIDTH + x;
+        &mut self.0[i]
     }
 }
 
 struct Scene {
     objects: Vec<Sphere>,
     camera: Camera,
+    ambient: Color,
 }
 
 impl Scene {
     fn render(&self) -> Image {
         let mut out = Image::new();
         for (x, y, ray) in self.camera.rays() {
-            let color = self
-                .objects
-                .iter()
-                .filter_map(|obj| {
-                    let (t, _) = obj.intersect(&ray)?;
-                    Some((t, obj.color))
-                })
-                .min()
-                .map_or([0; 3], |(_, color)| color);
-            out[(x, y)] = color;
+            out[(x, y)] = self.sample_color(ray);
         }
         out
+    }
+    fn sample_color(&self, ray: Ray) -> Color {
+        self.objects
+            .iter()
+            .filter_map(|obj| {
+                let (t, _) = obj.intersect(&ray)?;
+                Some((t, obj.material.diffuse))
+            })
+            .min()
+            .map_or(BLACK, |(_, color)| color)
     }
 }
 
 struct Sphere {
     r2: NotNan<f64>, // squared
     pt: V3,
-    color: [u8; 3],
+    material: Material,
+}
+
+impl Sphere {
+    fn intersect(&self, ray: &Ray) -> Option<(NotNan<f64>, V3)> {
+        let center = self.pt - ray.origin;
+        let t_closest = center.dot(ray.orientation);
+        if t_closest <= 0.0.try_into().unwrap() {
+            return None;
+        }
+        let closest = t_closest * ray.orientation;
+        let d2_closest = (center - closest).norm2();
+        if d2_closest > self.r2 {
+            return None;
+        }
+        let closest_depth = (self.r2 - d2_closest).sqrt();
+        let t = t_closest - closest_depth;
+        let pt = ray.origin + ray.orientation * t;
+        Some((t, pt))
+    }
+}
+
+struct Material {
+    diffuse: Color,
+}
+
+impl Material {
+    fn new(diffuse: [f32; 3]) -> Result<Self, FloatIsNan> {
+        Ok(Material {
+            diffuse: new_color(diffuse)?,
+        })
+    }
+}
+
+type Color = [NotNan<f32>; 3];
+
+fn new_color([r, g, b]: [f32; 3]) -> Result<Color, FloatIsNan> {
+    Ok([r.try_into()?, g.try_into()?, b.try_into()?])
+}
+
+const unsafe fn unchecked_new_color([r, g, b]: [f32; 3]) -> Color {
+    [
+        NotNan::unchecked_new(r),
+        NotNan::unchecked_new(g),
+        NotNan::unchecked_new(b),
+    ]
 }
 
 struct Camera {}
@@ -131,25 +196,6 @@ impl Camera {
 struct Ray {
     origin: V3,
     orientation: V3,
-}
-
-impl Sphere {
-    fn intersect(&self, ray: &Ray) -> Option<(NotNan<f64>, V3)> {
-        let center = self.pt - ray.origin;
-        let t_closest = center.dot(ray.orientation);
-        if t_closest <= 0.0.try_into().unwrap() {
-            return None;
-        }
-        let closest = t_closest * ray.orientation;
-        let d2_closest = (center - closest).norm2();
-        if d2_closest > self.r2 {
-            return None;
-        }
-        let closest_depth = (self.r2 - d2_closest).sqrt();
-        let t = t_closest - closest_depth;
-        let pt = ray.origin + ray.orientation * t;
-        Some((t, pt))
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
