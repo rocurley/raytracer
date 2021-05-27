@@ -2,34 +2,43 @@
 use anyhow::Result;
 use ordered_float::{FloatIsNan, NotNan};
 use png;
+use rand::seq::SliceRandom;
+use rand::Rng;
+use rand_distr::{Distribution, UnitSphere};
 use std::convert::TryInto;
 use std::f64::consts::PI;
 use std::fs::File;
-use std::io::{stdout, BufWriter, Write};
-use std::ops::{Add, Index, IndexMut, Mul, Sub};
+use std::io::BufWriter;
+use std::ops::{Add, Div, Index, IndexMut, Mul, Sub};
 use std::path::Path;
 
 fn main() {
-    let scene = Scene {
+    let mut scene = Scene {
         objects: vec![
             Sphere {
-                pt: V3::new(0., 0., 20.),
-                r2: 100.0.try_into().unwrap(),
-                material: Material::new([1.0, 0.0, 0.0]).unwrap(),
-            },
-            Sphere {
-                pt: V3::new(0., 0., 10.),
-                r2: 9.0.try_into().unwrap(),
-                material: Material::new([0.0, 1.0, 0.0]).unwrap(),
+                pt: V3::new(1., -1., 3.),
+                r2: 1.0.try_into().unwrap(),
+                material: Material::new([0.5, 1.0, 0.5]).unwrap(),
             },
             Sphere {
                 pt: V3::new(1., 1., 3.),
                 r2: 1.0.try_into().unwrap(),
-                material: Material::new([0.0, 0.0, 1.0]).unwrap(),
+                material: Material::new([0.5, 0.5, 1.0]).unwrap(),
+            },
+            Sphere {
+                pt: V3::new(-1., -1., 3.),
+                r2: 1.0.try_into().unwrap(),
+                material: Material::new([1.0, 0.5, 0.5]).unwrap(),
+            },
+            Sphere {
+                pt: V3::new(-1., 1., 3.),
+                r2: 1.0.try_into().unwrap(),
+                material: Material::new([0.5, 0.5, 0.5]).unwrap(),
             },
         ],
         camera: Camera {},
         ambient: new_color([1.0, 1.0, 1.0]).unwrap(),
+        rng: rand::thread_rng(),
     };
     let image = scene.render();
     image.write("out.png").unwrap();
@@ -41,6 +50,7 @@ const HEIGHT: usize = 1000;
 struct Image(Box<[Color]>);
 
 const BLACK: Color = unsafe { unchecked_new_color([0.0; 3]) };
+const WHITE: Color = unsafe { unchecked_new_color([1.0; 3]) };
 
 impl Image {
     fn new() -> Self {
@@ -77,7 +87,7 @@ impl Image {
 }
 
 impl Index<(usize, usize)> for Image {
-    type Output = [NotNan<f32>; 3];
+    type Output = [NotNan<f64>; 3];
 
     fn index(&self, (x, y): (usize, usize)) -> &Self::Output {
         let i = y * WIDTH + x;
@@ -92,29 +102,60 @@ impl IndexMut<(usize, usize)> for Image {
     }
 }
 
-struct Scene {
+struct Scene<R> {
     objects: Vec<Sphere>,
     camera: Camera,
     ambient: Color,
+    rng: R,
 }
 
-impl Scene {
-    fn render(&self) -> Image {
+impl<R: Rng> Scene<R> {
+    fn render(&mut self) -> Image {
         let mut out = Image::new();
         for (x, y, ray) in self.camera.rays() {
-            out[(x, y)] = self.sample_color(ray);
+            for _ in 0..20 {
+                out[(x, y)] = add_colors(out[(x, y)], self.sample_color(ray.clone()));
+            }
         }
         out
     }
-    fn sample_color(&self, ray: Ray) -> Color {
-        self.objects
-            .iter()
-            .filter_map(|obj| {
-                let (t, _) = obj.intersect(&ray)?;
-                Some((t, obj.material.diffuse))
-            })
-            .min()
-            .map_or(BLACK, |(_, color)| color)
+    fn sample_color(&mut self, mut ray: Ray) -> Color {
+        let mut filter_color = WHITE;
+        loop {
+            let collision = self
+                .objects
+                .iter()
+                .filter_map(|obj| {
+                    let (t, x, n) = obj.intersect(&ray)?;
+                    Some((t, x, n, obj))
+                })
+                .min_by_key(|(t, _, _, _)| *t);
+
+            let (_t, x, n, obj) = match collision {
+                None => return mul_colors(filter_color, self.ambient),
+                Some(c) => c,
+            };
+            ray = Ray {
+                origin: x,
+                orientation: random_unit_vector_above_plane(&mut self.rng, n),
+            };
+            filter_color = mul_colors(filter_color, obj.material.diffuse);
+        }
+    }
+}
+
+fn random_unit_vector<R: Rng>(rng: &mut R) -> V3 {
+    let [x, y, z] = UnitSphere.sample(rng);
+    V3::new(x, y, z)
+}
+
+fn random_unit_vector_above_plane<R: Rng>(rng: &mut R, normal: V3) -> V3 {
+    let v = random_unit_vector(rng);
+    let dot = v.dot(normal);
+    if dot.into_inner() < 0.0 {
+        v - NotNan::new(2.0).unwrap() * dot * normal
+    } else {
+        v
     }
 }
 
@@ -125,7 +166,7 @@ struct Sphere {
 }
 
 impl Sphere {
-    fn intersect(&self, ray: &Ray) -> Option<(NotNan<f64>, V3)> {
+    fn intersect(&self, ray: &Ray) -> Option<(NotNan<f64>, V3, V3)> {
         let center = self.pt - ray.origin;
         let t_closest = center.dot(ray.orientation);
         if t_closest <= 0.0.try_into().unwrap() {
@@ -139,7 +180,9 @@ impl Sphere {
         let closest_depth = (self.r2 - d2_closest).sqrt();
         let t = t_closest - closest_depth;
         let pt = ray.origin + ray.orientation * t;
-        Some((t, pt))
+        let mut normal = pt - center;
+        normal = normal / normal.norm();
+        Some((t, pt, normal))
     }
 }
 
@@ -148,25 +191,64 @@ struct Material {
 }
 
 impl Material {
-    fn new(diffuse: [f32; 3]) -> Result<Self, FloatIsNan> {
+    fn new(diffuse: [f64; 3]) -> Result<Self, FloatIsNan> {
         Ok(Material {
             diffuse: new_color(diffuse)?,
         })
     }
 }
 
-type Color = [NotNan<f32>; 3];
+type Color = [NotNan<f64>; 3];
 
-fn new_color([r, g, b]: [f32; 3]) -> Result<Color, FloatIsNan> {
+fn new_color([r, g, b]: [f64; 3]) -> Result<Color, FloatIsNan> {
     Ok([r.try_into()?, g.try_into()?, b.try_into()?])
 }
 
-const unsafe fn unchecked_new_color([r, g, b]: [f32; 3]) -> Color {
+const unsafe fn unchecked_new_color([r, g, b]: [f64; 3]) -> Color {
     [
         NotNan::unchecked_new(r),
         NotNan::unchecked_new(g),
         NotNan::unchecked_new(b),
     ]
+}
+
+fn add_colors(x: Color, y: Color) -> Color {
+    [x[0] + y[0], x[1] + y[1], x[2] + y[2]]
+}
+
+fn mul_colors(x: Color, y: Color) -> Color {
+    [x[0] * y[0], x[1] * y[1], x[2] * y[2]]
+}
+
+/// We use this in cases where one ray would "reverse-scatter" into many rays. We want to keep
+/// it to 1 (or 0) at every step. This could be changed in the future.
+///
+/// We can do this by assigning every possible ray a probability (such that the total
+/// probability is 1), and scaling the color by the inverse of that probability. In expectation,
+/// it doesn't matter what probabilities we pick: it'll be correct regardless. However, because
+/// we're not going to trace an infinite number of rays, we care about expected error. The
+/// obvious optimization criterion is to minimize the expected squared error. We get:
+/// $$ E = \sum_{i,j} p_i \left(c_{ij}/p_i - \bar c_j\right)^2 $$
+/// $$ E = \sum_{i,j} c_{ij}^2/p_i -2 c_{ij} \bar c_j +  \bar c_j^2 p_i $$
+/// $$ E = \sum_j \bar c_j^2 + \sum_{i} c_{ij}^2/p_i -2 c_{ij} \bar c_j$$
+/// $$ \frac{\partial E}{\partial p_i} = -\frac{\sum_j c_{ij}^2}{p_i^2} $$
+/// Now since we're optimizing with respect to the constraint of the probabilities adding up to 1:
+/// $$ \frac{\partial E}{\partial p_i} = -\frac{\sum_j c_{ij}^2}{p_i^2} =
+/// \lambda \frac{\partial C}{\partial p_i} = \lambda $$
+/// $$  -\sum_j c_{ij}^2 = \lambda p_i^2 $$
+/// So the probability assigned to each ray is proportional to the l2 norm of the colors, which is
+/// a pleasing result.
+fn random_color_weighted<'a, 'b, T, R: Rng>(
+    rng: &'a mut R,
+    samples: &'b [(Color, T)],
+) -> (Color, &'b T) {
+    let total_norm: NotNan<f64> = samples.iter().map(|(c, _)| V3(*c).norm()).sum();
+    let (c, x) = samples
+        .choose_weighted(rng, |(c, _)| V3(*c).norm().into_inner())
+        .unwrap();
+    let cv = V3(*c);
+    let p = cv.norm() / total_norm;
+    ((cv / p).0, x)
 }
 
 struct Camera {}
@@ -193,6 +275,7 @@ impl Camera {
     }
 }
 
+#[derive(Clone, Debug)]
 struct Ray {
     origin: V3,
     orientation: V3,
@@ -253,5 +336,19 @@ impl Mul<V3> for NotNan<f64> {
     type Output = V3;
     fn mul(self, other: V3) -> Self::Output {
         V3([other.0[0] * self, other.0[1] * self, other.0[2] * self])
+    }
+}
+
+impl Div<NotNan<f64>> for V3 {
+    type Output = V3;
+    fn div(self, other: NotNan<f64>) -> Self::Output {
+        V3([self.0[0] / other, self.0[1] / other, self.0[2] / other])
+    }
+}
+
+impl Div<V3> for NotNan<f64> {
+    type Output = V3;
+    fn div(self, other: V3) -> Self::Output {
+        V3([other.0[0] / self, other.0[1] / self, other.0[2] / self])
     }
 }
