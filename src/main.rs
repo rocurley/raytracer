@@ -12,28 +12,34 @@ use std::io::BufWriter;
 use std::ops::{Add, Div, Index, IndexMut, Mul, Sub};
 use std::path::Path;
 
+// TODO:
+// * Investigate "sparkles"
+// * Read scene from a file
+// * Show rendering live
+// * Profiling!
+
 fn main() {
     let mut scene = Scene {
         objects: vec![
             Sphere {
                 pt: V3::new(1., -1., 3.),
                 r2: 1.0.try_into().unwrap(),
-                material: Material::new([0.5, 1.0, 0.5]).unwrap(),
+                material: Material::new([0.5, 1.0, 0.5], [0.0; 3]).unwrap(),
             },
             Sphere {
                 pt: V3::new(1., 1., 3.),
                 r2: 1.0.try_into().unwrap(),
-                material: Material::new([0.5, 0.5, 1.0]).unwrap(),
+                material: Material::new([0.5, 0.5, 1.0], [0.0; 3]).unwrap(),
             },
             Sphere {
                 pt: V3::new(-1., -1., 3.),
                 r2: 1.0.try_into().unwrap(),
-                material: Material::new([1.0, 0.5, 0.5]).unwrap(),
+                material: Material::new([1.0, 0.5, 0.5], [0.0; 3]).unwrap(),
             },
             Sphere {
                 pt: V3::new(-1., 1., 3.),
                 r2: 1.0.try_into().unwrap(),
-                material: Material::new([0.5, 0.5, 0.5]).unwrap(),
+                material: Material::new([0.5, 0.5, 0.5], [5.0; 3]).unwrap(),
             },
         ],
         camera: Camera {},
@@ -59,14 +65,10 @@ impl Image {
     }
     fn write(&self, path: &str) -> Result<()> {
         let mut buffer = [0; 4 * WIDTH * HEIGHT];
-        let max_exposure = self
-            .0
-            .iter()
-            .flat_map(|px| px.iter())
-            .copied()
-            .max()
-            .unwrap()
-            .into_inner();
+        let mut saturations: Vec<NotNan<f64>> =
+            self.0.iter().flat_map(|px| px.iter()).copied().collect();
+        saturations.sort();
+        let max_exposure = saturations[saturations.len() * 19 / 20].into_inner();
         for (b_px, px) in buffer.chunks_exact_mut(4).zip(self.0.iter()) {
             for i in 0..3 {
                 b_px[i] = (px[i].into_inner() * 255.0 / max_exposure) as u8;
@@ -113,7 +115,7 @@ impl<R: Rng> Scene<R> {
     fn render(&mut self) -> Image {
         let mut out = Image::new();
         for (x, y, ray) in self.camera.rays() {
-            for _ in 0..20 {
+            for _ in 0..200 {
                 out[(x, y)] = add_colors(out[(x, y)], self.sample_color(ray.clone()));
             }
         }
@@ -135,11 +137,20 @@ impl<R: Rng> Scene<R> {
                 None => return mul_colors(filter_color, self.ambient),
                 Some(c) => c,
             };
-            ray = Ray {
+            let diffuse_ray = Ray {
                 origin: x,
                 orientation: random_unit_vector_above_plane(&mut self.rng, n),
             };
-            filter_color = mul_colors(filter_color, obj.material.diffuse);
+            let options = [
+                (obj.material.diffuse, Some(diffuse_ray)),
+                (obj.material.luminosity, None),
+            ];
+            let (new_color, new_ray) = random_color_weighted(&mut self.rng, &options);
+            filter_color = mul_colors(filter_color, new_color);
+            match new_ray {
+                Some(r) => ray = r.clone(),
+                None => return filter_color,
+            }
         }
     }
 }
@@ -188,12 +199,14 @@ impl Sphere {
 
 struct Material {
     diffuse: Color,
+    luminosity: Color,
 }
 
 impl Material {
-    fn new(diffuse: [f64; 3]) -> Result<Self, FloatIsNan> {
+    fn new(diffuse: [f64; 3], luminosity: [f64; 3]) -> Result<Self, FloatIsNan> {
         Ok(Material {
             diffuse: new_color(diffuse)?,
+            luminosity: new_color(luminosity)?,
         })
     }
 }
