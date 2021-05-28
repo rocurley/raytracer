@@ -1,6 +1,7 @@
 // For reading and opening files
 use anyhow::Result;
 use cpuprofiler::PROFILER;
+use minifb::{Key, Window, WindowOptions};
 use ordered_float::NotNan;
 use png;
 use rand::seq::SliceRandom;
@@ -16,16 +17,29 @@ use std::path::Path;
 
 // TODO:
 // * Investigate "sparkles"
-// * Show rendering live
 // * Profiling!
 
 fn main() {
     let scene_str = std::fs::read_to_string("scene.toml").unwrap();
     let mut scene: Scene = toml::de::from_str(&scene_str).unwrap();
-    println!("Read scene");
     PROFILER.lock().unwrap().start("./profile.pprof").unwrap();
-    let image = scene.render();
-    image.write("out.png").unwrap();
+    let mut image = Image::new();
+    let mut buffer = [0u32; WIDTH * HEIGHT];
+
+    let mut window = Window::new(
+        "Rendering - ESC to stop here",
+        WIDTH,
+        HEIGHT,
+        WindowOptions::default(),
+    )
+    .unwrap();
+
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+        scene.render_once(&mut image);
+        image.write_to_buffer(&mut buffer);
+        window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
+    }
+    write_png("out.png", &buffer).unwrap();
     PROFILER.lock().unwrap().stop().unwrap();
 }
 
@@ -42,29 +56,45 @@ impl Image {
         let v = vec![BLACK; WIDTH * HEIGHT];
         Image(v.into_boxed_slice())
     }
-    fn write(&self, path: &str) -> Result<()> {
-        let mut buffer = [0; 4 * WIDTH * HEIGHT];
+    fn write_to_buffer(&self, buffer: &mut [u32; WIDTH * HEIGHT]) {
         let mut saturations: Vec<NotNan<f64>> =
             self.0.iter().flat_map(|px| px.iter()).copied().collect();
         saturations.sort();
         let max_exposure = saturations[saturations.len() * 19 / 20].into_inner();
-        for (b_px, px) in buffer.chunks_exact_mut(4).zip(self.0.iter()) {
+        for (b_px, px) in buffer.iter_mut().zip(self.0.iter()) {
+            let mut b_px_arr = [0; 4];
             for i in 0..3 {
-                b_px[i] = (px[i].into_inner() * 255.0 / max_exposure) as u8;
+                b_px_arr[i + 1] = (px[i].into_inner() * 255.0 / max_exposure) as u8;
             }
-            b_px[3] = 255;
+            *b_px = u32::from_be_bytes(b_px_arr);
         }
-        let path = Path::new(path);
-        let file = File::create(path)?;
-        let ref mut w = BufWriter::new(file);
-
-        let mut encoder = png::Encoder::new(w, 1000, 1000);
-        encoder.set_color(png::ColorType::RGBA);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header()?;
-        writer.write_image_data(&buffer)?;
-        Ok(())
     }
+}
+
+fn window_buffer_to_png_buffer(input: &[u32; WIDTH * HEIGHT]) -> [u8; 4 * WIDTH * HEIGHT] {
+    let mut out = [0; 4 * WIDTH * HEIGHT];
+    for (input_pixel, output_pixel) in input.iter().zip(out.chunks_exact_mut(4)) {
+        let [_, r, g, b] = input_pixel.to_be_bytes();
+        output_pixel[0] = r;
+        output_pixel[1] = g;
+        output_pixel[2] = b;
+        output_pixel[3] = 255;
+    }
+    out
+}
+
+fn write_png(path: &str, window_buffer: &[u32; WIDTH * HEIGHT]) -> Result<()> {
+    let buffer = window_buffer_to_png_buffer(window_buffer);
+    let path = Path::new(path);
+    let file = File::create(path)?;
+    let ref mut w = BufWriter::new(file);
+
+    let mut encoder = png::Encoder::new(w, 1000, 1000);
+    encoder.set_color(png::ColorType::RGBA);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&buffer)?;
+    Ok(())
 }
 
 impl Index<(usize, usize)> for Image {
@@ -94,14 +124,10 @@ struct Scene {
 }
 
 impl Scene {
-    fn render(&mut self) -> Image {
-        let mut out = Image::new();
+    fn render_once(&mut self, out: &mut Image) {
         for (x, y, ray) in self.camera.rays() {
-            for _ in 0..20 {
-                out[(x, y)] = add_colors(out[(x, y)], self.sample_color(ray.clone()));
-            }
+            out[(x, y)] = add_colors(out[(x, y)], self.sample_color(ray.clone()));
         }
-        out
     }
     fn sample_color(&mut self, mut ray: Ray) -> Color {
         let mut filter_color = WHITE;
