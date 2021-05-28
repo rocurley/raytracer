@@ -1,10 +1,12 @@
 // For reading and opening files
 use anyhow::Result;
-use ordered_float::{FloatIsNan, NotNan};
+use cpuprofiler::PROFILER;
+use ordered_float::NotNan;
 use png;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rand_distr::{Distribution, UnitSphere};
+use serde::Deserialize;
 use std::convert::TryInto;
 use std::f64::consts::PI;
 use std::fs::File;
@@ -14,40 +16,17 @@ use std::path::Path;
 
 // TODO:
 // * Investigate "sparkles"
-// * Read scene from a file
 // * Show rendering live
 // * Profiling!
 
 fn main() {
-    let mut scene = Scene {
-        objects: vec![
-            Sphere {
-                pt: V3::new(1., -1., 3.),
-                r2: 1.0.try_into().unwrap(),
-                material: Material::new([0.5, 1.0, 0.5], [0.0; 3]).unwrap(),
-            },
-            Sphere {
-                pt: V3::new(1., 1., 3.),
-                r2: 1.0.try_into().unwrap(),
-                material: Material::new([0.5, 0.5, 1.0], [0.0; 3]).unwrap(),
-            },
-            Sphere {
-                pt: V3::new(-1., -1., 3.),
-                r2: 1.0.try_into().unwrap(),
-                material: Material::new([1.0, 0.5, 0.5], [0.0; 3]).unwrap(),
-            },
-            Sphere {
-                pt: V3::new(-1., 1., 3.),
-                r2: 1.0.try_into().unwrap(),
-                material: Material::new([0.5, 0.5, 0.5], [5.0; 3]).unwrap(),
-            },
-        ],
-        camera: Camera {},
-        ambient: new_color([1.0, 1.0, 1.0]).unwrap(),
-        rng: rand::thread_rng(),
-    };
+    let scene_str = std::fs::read_to_string("scene.toml").unwrap();
+    let mut scene: Scene = toml::de::from_str(&scene_str).unwrap();
+    println!("Read scene");
+    PROFILER.lock().unwrap().start("./profile.pprof").unwrap();
     let image = scene.render();
     image.write("out.png").unwrap();
+    PROFILER.lock().unwrap().stop().unwrap();
 }
 
 const WIDTH: usize = 1000;
@@ -104,18 +83,21 @@ impl IndexMut<(usize, usize)> for Image {
     }
 }
 
-struct Scene<R> {
+#[derive(Deserialize)]
+struct Scene {
     objects: Vec<Sphere>,
+    #[serde(default)]
     camera: Camera,
     ambient: Color,
-    rng: R,
+    #[serde(skip)]
+    rng: rand::rngs::ThreadRng,
 }
 
-impl<R: Rng> Scene<R> {
+impl Scene {
     fn render(&mut self) -> Image {
         let mut out = Image::new();
         for (x, y, ray) in self.camera.rays() {
-            for _ in 0..200 {
+            for _ in 0..20 {
                 out[(x, y)] = add_colors(out[(x, y)], self.sample_color(ray.clone()));
             }
         }
@@ -170,6 +152,7 @@ fn random_unit_vector_above_plane<R: Rng>(rng: &mut R, normal: V3) -> V3 {
     }
 }
 
+#[derive(Deserialize)]
 struct Sphere {
     r2: NotNan<f64>, // squared
     pt: V3,
@@ -197,25 +180,13 @@ impl Sphere {
     }
 }
 
+#[derive(Deserialize)]
 struct Material {
     diffuse: Color,
     luminosity: Color,
 }
 
-impl Material {
-    fn new(diffuse: [f64; 3], luminosity: [f64; 3]) -> Result<Self, FloatIsNan> {
-        Ok(Material {
-            diffuse: new_color(diffuse)?,
-            luminosity: new_color(luminosity)?,
-        })
-    }
-}
-
 type Color = [NotNan<f64>; 3];
-
-fn new_color([r, g, b]: [f64; 3]) -> Result<Color, FloatIsNan> {
-    Ok([r.try_into()?, g.try_into()?, b.try_into()?])
-}
 
 const unsafe fn unchecked_new_color([r, g, b]: [f64; 3]) -> Color {
     [
@@ -264,6 +235,7 @@ fn random_color_weighted<'a, 'b, T, R: Rng>(
     ((cv / p).0, x)
 }
 
+#[derive(Deserialize, Default)]
 struct Camera {}
 
 impl Camera {
@@ -294,7 +266,7 @@ struct Ray {
     orientation: V3,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 struct V3([NotNan<f64>; 3]);
 
 impl V3 {
