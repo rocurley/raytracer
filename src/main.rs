@@ -1,5 +1,6 @@
 // For reading and opening files
 use anyhow::Result;
+use argh::FromArgs;
 use cpuprofiler::PROFILER;
 use minifb::{Key, Window, WindowOptions};
 use ordered_float::NotNan;
@@ -18,26 +19,58 @@ use std::path::Path;
 // TODO:
 // * Investigate "sparkles"
 // * Profiling!
+// * Add options:
+//   * Input scene
+//   * Output file
+
+#[derive(FromArgs)]
+/// Render a scene
+struct Args {
+    /// disables the live rendering preview
+    #[argh(switch)]
+    disable_gui: bool,
+    /// maximum number of samples to take. If omitted, rendering will continue until cancelled.
+    #[argh(option)]
+    samples: Option<usize>,
+}
 
 fn main() {
+    let args: Args = argh::from_env();
+    if args.disable_gui && args.samples.is_none() {
+        println!("'samples' must be provided if 'dsiable_gui' is enabled");
+    }
     let scene_str = std::fs::read_to_string("scene.toml").unwrap();
     let mut scene: Scene = toml::de::from_str(&scene_str).unwrap();
     PROFILER.lock().unwrap().start("./profile.pprof").unwrap();
     let mut image = Image::new();
     let mut buffer = [0u32; WIDTH * HEIGHT];
 
-    let mut window = Window::new(
-        "Rendering - ESC to stop here",
-        WIDTH,
-        HEIGHT,
-        WindowOptions::default(),
-    )
-    .unwrap();
+    let mut window = if !args.disable_gui {
+        Some(
+            Window::new(
+                "Rendering - ESC to stop here",
+                WIDTH,
+                HEIGHT,
+                WindowOptions::default(),
+            )
+            .unwrap(),
+        )
+    } else {
+        None
+    };
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
+    for _ in 0..args.samples.unwrap_or(usize::MAX) {
         scene.render_once(&mut image);
+        if let Some(window) = window.as_mut() {
+            if !window.is_open() || window.is_key_down(Key::Escape) {
+                break;
+            }
+            image.write_to_buffer(&mut buffer);
+            window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
+        }
+    }
+    if window.is_none() {
         image.write_to_buffer(&mut buffer);
-        window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
     }
     write_png("out.png", &buffer).unwrap();
     PROFILER.lock().unwrap().stop().unwrap();
