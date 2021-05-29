@@ -13,7 +13,7 @@ use std::convert::TryInto;
 use std::f64::consts::PI;
 use std::fs::File;
 use std::io::BufWriter;
-use std::ops::{Add, Div, Index, IndexMut, Mul, Sub};
+use std::ops::{Add, Div, Index, IndexMut, Mul, Neg, Sub};
 use std::path::Path;
 
 // TODO:
@@ -178,19 +178,20 @@ impl Scene {
                 None => return mul_colors(filter_color, self.ambient),
                 Some(c) => c,
             };
-            let diffuse_ray = Ray {
-                origin: x,
-                orientation: random_unit_vector_above_plane(&mut self.rng, n),
-            };
             let options = [
-                (obj.material.diffuse, Some(diffuse_ray)),
-                (obj.material.luminosity, None),
+                (obj.material.diffuse, MaterialProperty::Diffuse),
+                (obj.material.luminous, MaterialProperty::Luminous),
             ];
-            let (new_color, new_ray) = random_color_weighted(&mut self.rng, &options);
+            let (new_color, prop) = random_color_weighted(&mut self.rng, &options);
             filter_color = mul_colors(filter_color, new_color);
-            match new_ray {
-                Some(r) => ray = r.clone(),
-                None => return filter_color,
+            match prop {
+                MaterialProperty::Diffuse => {
+                    ray = Ray {
+                        origin: x,
+                        orientation: random_unit_vector_above_plane(&mut self.rng, n),
+                    };
+                }
+                MaterialProperty::Luminous => return filter_color,
             }
         }
     }
@@ -205,7 +206,7 @@ fn random_unit_vector_above_plane<R: Rng>(rng: &mut R, normal: V3) -> V3 {
     let v = random_unit_vector(rng);
     let dot = v.dot(normal);
     if dot.into_inner() < 0.0 {
-        v - NotNan::new(2.0).unwrap() * dot * normal
+        -v
     } else {
         v
     }
@@ -242,7 +243,12 @@ impl Sphere {
 #[derive(Deserialize)]
 struct Material {
     diffuse: Color,
-    luminosity: Color,
+    luminous: Color,
+}
+
+enum MaterialProperty {
+    Diffuse,
+    Luminous,
 }
 
 type Color = [NotNan<f64>; 3];
@@ -394,5 +400,12 @@ impl Div<V3> for NotNan<f64> {
     type Output = V3;
     fn div(self, other: V3) -> Self::Output {
         V3([other.0[0] / self, other.0[1] / self, other.0[2] / self])
+    }
+}
+
+impl Neg for V3 {
+    type Output = V3;
+    fn neg(self) -> Self::Output {
+        V3([-self.0[0], -self.0[1], -self.0[2]])
     }
 }
